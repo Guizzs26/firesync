@@ -1,0 +1,23 @@
+services:
+  postgres-main:
+    image: postgres:16
+    container_name: firesync_postgres
+    environment:
+      POSTGRES_USER: test-user
+      POSTGRES_PASSWORD: test-pass
+      POSTGRES_DB: test-db
+    ports:
+      - "7856:5432"
+    volumes:
+      - postgres_sonda:/var/lib/postgresql/data
+
+  firebird-legacy:
+    image: jacobalberty/firebird:2.5-ss
+    container_name: firesync_firebird
+    environment:
+      - ISC_PASSWORD=masterkey
+    ports:
+      - "7854:3050"
+
+volumes:
+  postgres_sonda:

@@ -1,9 +1,16 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
+	"time"
 
 	"github.com/gofrs/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"  // Driver Postgres
+	_ "github.com/nakagami/firebirdsql" // Driver Firebird
 )
 
 /*
@@ -68,6 +75,97 @@ type Control struct {
 	IsSyncEvent bool `json:"is_sync_event"`
 }
 
-func main() {
+type Config struct {
+	Source      DBConfig `yaml:"source"`
+	Target      DBConfig `yaml:"target"`
+	SourceTable string   `yaml:"source_table"`
+	TargetTable string   `yaml:"target_table"`
+}
 
+type DBConfig struct {
+	Driver   string `yaml:"driver"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Database string `yaml:"database"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+}
+
+func main() {
+	fmt.Println("🚀 Iniciando teste de conectividade nos bancos...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pgDSN := "postgres://test-user:test-pass@localhost:7856/test-db?sslmode=disable"
+	testDB(ctx, "pgx", pgDSN, "Postgres 16")
+
+	fbDSN := "SYSDBA:masterkey@localhost:7854//firebird/data/pax.fdb"
+	testDB(ctx, "firebirdsql", fbDSN, "Firebird 2.5")
+
+}
+
+func testDB(ctx context.Context, driver, dsn, name string) {
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		log.Printf("❌ [%s] Erro no driver: %v", name, err)
+		return
+	}
+	defer db.Close()
+
+	if err := db.PingContext(ctx); err != nil {
+		log.Printf("❌ [%s] Falha na conexão: %v", name, err)
+		return
+	}
+
+	events, _ := FetchEvents(db)
+	for _, ev := range events {
+		pretty, _ := json.MarshalIndent(ev, "", "  ")
+		fmt.Printf("📦 Evento Capturado:\n%s\n", string(pretty))
+	}
+
+	fmt.Printf("✅ [%s] Conectado com sucesso!\n", name)
+}
+
+func FetchEvents(db *sql.DB) ([]Event, error) {
+	const query = `
+    SELECT ID, TABLE_NAME, OPERATION, PAYLOAD_BEFORE, PAYLOAD_AFTER, SEQUENCE_ID
+    FROM SYNC_OUTBOX
+    WHERE PROCESSED = 0
+    ORDER BY SEQUENCE_ID ASC
+  `
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var outboxID int64
+		var before, after []byte
+
+		if err := rows.Scan(
+			&outboxID,
+			&e.Metadata.Table,
+			&e.Metadata.Operation,
+			&before,
+			&after,
+			&e.Metadata.SequenceID,
+		); err != nil {
+			return nil, err
+		}
+
+		e.Metadata.EventID, _ = uuid.NewV7()
+		e.Payload.Before = before
+		e.Payload.After = after
+		e.Metadata.SchemaVersion = 1
+		e.Metadata.TimestampOrigin = time.Now().UnixNano()
+
+		events = append(events, e)
+	}
+
+	return events, nil
 }
