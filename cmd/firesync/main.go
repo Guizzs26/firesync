@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/gofrs/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"  // Driver Postgres
-	_ "github.com/nakagami/firebirdsql" // Driver Firebird
+	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/nakagami/firebirdsql"
 )
 
 /*
@@ -56,6 +57,7 @@ type Event struct {
 
 type Metadata struct {
 	EventID         uuid.UUID `json:"event_id"`
+	OutboxID        int64     `json:"-"`
 	Operation       Operation `json:"operation"`
 	Table           string    `json:"table"`
 	SourceNodeID    string    `json:"source_node_id"`
@@ -92,39 +94,34 @@ type DBConfig struct {
 }
 
 func main() {
-	fmt.Println("🚀 Iniciando teste de conectividade nos bancos...")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pgDSN := "postgres://test-user:test-pass@localhost:7856/test-db?sslmode=disable"
-	testDB(ctx, "pgx", pgDSN, "Postgres 16")
-
 	fbDSN := "SYSDBA:masterkey@localhost:7854//firebird/data/pax.fdb"
-	testDB(ctx, "firebirdsql", fbDSN, "Firebird 2.5")
-
-}
-
-func testDB(ctx context.Context, driver, dsn, name string) {
-	db, err := sql.Open(driver, dsn)
+	db, err := Connect(ctx, "firebird", fbDSN)
 	if err != nil {
-		log.Printf("❌ [%s] Erro no driver: %v", name, err)
-		return
+		os.Exit(1)
 	}
 	defer db.Close()
 
+	go StartWorker(db)
+}
+
+func Connect(ctx context.Context, driver, dsn string) (*sql.DB, error) {
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		log.Printf("open: %v", err)
+		return nil, err
+	}
+
 	if err := db.PingContext(ctx); err != nil {
-		log.Printf("❌ [%s] Falha na conexão: %v", name, err)
-		return
+		log.Printf("ping: %v", err)
+		return nil, err
 	}
 
-	events, _ := FetchEvents(db)
-	for _, ev := range events {
-		pretty, _ := json.MarshalIndent(ev, "", "  ")
-		fmt.Printf("📦 Evento Capturado:\n%s\n", string(pretty))
-	}
+	fmt.Println("sucessfully connected!")
 
-	fmt.Printf("✅ [%s] Conectado com sucesso!\n", name)
+	return db, nil
 }
 
 func FetchEvents(db *sql.DB) ([]Event, error) {
@@ -144,11 +141,10 @@ func FetchEvents(db *sql.DB) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var outboxID int64
 		var before, after []byte
 
 		if err := rows.Scan(
-			&outboxID,
+			&e.Metadata.OutboxID,
 			&e.Metadata.Table,
 			&e.Metadata.Operation,
 			&before,
@@ -162,10 +158,54 @@ func FetchEvents(db *sql.DB) ([]Event, error) {
 		e.Payload.Before = before
 		e.Payload.After = after
 		e.Metadata.SchemaVersion = 1
-		e.Metadata.TimestampOrigin = time.Now().UnixNano()
+		// e.Metadata.TimestampOrigin = time.Now().UnixNano()
 
 		events = append(events, e)
 	}
 
 	return events, nil
+}
+
+func MarkAsProcessed(db *sql.DB, outboxID int64) error {
+	const query = `
+		UPDATE SYNC_OUTBOX SET PROCESSED = 1 WHERE ID = ?
+	`
+
+	_, err := db.Exec(query, outboxID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func StartWorker(db *sql.DB) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	fmt.Println("initialized worker")
+
+	for range ticker.C {
+		events, err := FetchEvents(db)
+		if err != nil {
+			log.Printf("fetch events: %v", err)
+			continue
+		}
+
+		if len(events) == 0 {
+			continue
+		}
+
+		for _, ev := range events {
+			fmt.Printf("syncronized: [%s] ID: %d\n", ev.Metadata.Table, ev.Metadata.SequenceID)
+
+			err := MarkAsProcessed(db, ev.Metadata.OutboxID)
+			if err != nil {
+				log.Printf("mark as processed %d: %v", ev.Metadata.OutboxID, err)
+				continue
+			}
+
+			fmt.Printf("event %d processed and confirmed!\n", ev.Metadata.OutboxID)
+		}
+	}
 }
