@@ -10,6 +10,7 @@ services:
       - "7856:5432"
     volumes:
       - postgres_sonda:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/init-postgres.sql
 
   firebird-legacy:
     image: jacobalberty/firebird:2.5-ss

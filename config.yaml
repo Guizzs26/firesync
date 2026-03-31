@@ -1,0 +1,17 @@
+node_id: "teste"
+poll_interval: 5s
+
+source:
+  type: "firebird"
+  host: "localhost"
+  port: 7854
+  database: "/firebird/data/pax.fdb"
+  user: "SYSDBA"
+  password: "masterkey"
+
+destination:
+  type: "postgres"
+  url: "postgres://test-user:test-pass@localhost:7856/test-db?sslmode=disable"
+
+tables:
+  - "CLIENTES"
